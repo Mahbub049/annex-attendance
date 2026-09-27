@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "BUBT Annex Attendance Assistant",
+  "version": "1.2.0",
+  "description": "Premium server-connected BUBT Annex attendance assistant. Fetches teacher attendance from Marks Portal and fills Annex without auto-submitting.",
+  "action": {
+    "default_title": "BUBT Annex Attendance Assistant"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "activeTab",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://annex.bubt.edu.bd/*",
+    "http://annex.bubt.edu.bd/*",
+    "https://course-management-server-1l1s.onrender.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://annex.bubt.edu.bd/*",
+        "http://annex.bubt.edu.bd/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
