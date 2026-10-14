@@ -225,3 +225,23 @@
   .bap-date-block { margin-bottom: 2px; }
   .bap-session-actions { grid-column: auto; }
 }
+
+/* v1.3.0 — restrained, compact next-date workflow controls. */
+.bap-form-buttons { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+.bap-form-buttons .bap-icon-text-btn { padding: 8px 9px; }
+.bap-refresh-top { white-space: nowrap; color: #5861b3; }
+.bap-refresh-options { margin-top: 10px; padding: 11px 12px; border-radius: 13px; border: 1px solid #e1e6ee; background: #fbfcfe; }
+.bap-refresh-toggle { display: flex; align-items: center; justify-content: space-between; gap: 16px; cursor: pointer; }
+.bap-refresh-copy { min-width: 0; }
+.bap-refresh-copy strong { display: block; font-size: 10.5px; font-weight: 850; color: #344054; }
+.bap-refresh-copy small { display: block; max-width: 370px; margin-top: 3px; color: #828d9e; font-size: 9px; line-height: 1.5; }
+#bap-auto-refresh { appearance: none; -webkit-appearance: none; position: relative; flex: 0 0 auto; width: 34px; height: 20px; border: 1px solid #cbd3df; border-radius: 50px; background: #e9edf3; cursor: pointer; transition: background .15s ease; }
+#bap-auto-refresh::after { content: ""; display: block; position: absolute; width: 14px; height: 14px; top: 2px; left: 2px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.13); transition: transform .15s ease; }
+#bap-auto-refresh:checked { border-color: #686cdd; background: #686cdd; }
+#bap-auto-refresh:checked::after { transform: translateX(14px); }
+#bap-auto-refresh:focus-visible { outline: 2px solid #686cdd; outline-offset: 3px; }
+#bap-panel button:disabled { opacity: .55; cursor: wait; }
+@media (max-width: 420px) {
+  .bap-workflow-card.compact { grid-template-columns: 1fr; }
+  .bap-workflow-card.compact .bap-form-buttons { justify-content: flex-start; }
+}

@@ -1,4 +1,4 @@
-# BUBT Annex Attendance Assistant — v1.0
+# BUBT Annex Attendance Assistant — v1.3.0
 
 This build replaces the old Excel-upload demo with a server-connected workflow.
 
@@ -59,3 +59,26 @@ This version updates the extension interface with a more premium teacher-friendl
 
 ## Premium UI (v1.2.0)
 This release completely redesigns the extension drawer and attendance session controls while preserving the same secure Marks Portal server workflow and manual Annex submit behavior.
+
+
+## Seamless attendance workflow (v1.3.0)
+
+1. Install or **Reload** the extension in `chrome://extensions/` after replacing the extracted folder. Refresh the Annex tab once after updating the extension.
+2. On Annex **New Attendance**, open the Attendance Assistant and choose Intake, Section, and Course as usual.
+3. Fill an attendance date in Annex using the assistant and check the student checkboxes.
+4. **Click Annex Submit yourself.** The assistant does not submit or bypass any Annex confirmation.
+5. If Annex displays a **new successful attendance-submission message**, the assistant automatically reloads the Annex page. After reload, the assistant reappears open with the previous course, filters and attendance list already selected (server loading may take a moment).
+6. Choose the next saved attendance date and fill again. Your last filled date and expanded period rows remain remembered.
+7. If Annex saves data but does not provide a new detectable on-page success confirmation, click **↻ Refresh** beside **Rescan** to reload Annex and restore the same workspace. Do not refresh before Annex confirms the record was saved.
+8. You can switch off **Ready for the next date** if you prefer to control refresh manually.
+
+Clicking the extension **×** or elsewhere on Annex (other than its Submit button) closes the drawer; clicking the launcher reopens it. If you deliberately close the drawer, it stays closed after a page refresh.
+
+### Storage and safety
+- Remembered UI preferences are kept separately per Annex browser tab using `chrome.storage.session` and are cleared when the tab closes. They are never sent to the Annex server or Marks Portal API.
+- Existing Marks Portal account/token storage is unchanged. No new passwords, student list, roll-number data, or attendance matrix is stored as UI state.
+- The extension **never** clicks Annex Submit or invokes its submit action. It only observes the teacher's manual submission and, after a newly detected success message, reloads the page.
+- An actual page reload temporarily tears down and recreates a page-injected drawer. This build restores it automatically; a completely uninterrupted browser-native panel would need a separate Chrome Side Panel version.
+
+### Testing note
+The fill/restore/next-date workflow and fresh-success-triggered page reload were checked using a local browser mock of the Annex form. Actual Annex production DOM and submission behavior need a live signed-in acceptance check because Annex is a third-party site.

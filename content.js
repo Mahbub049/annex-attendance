@@ -14,7 +14,21 @@
     expandedDates: new Set(),
     busy: false,
     log: [],
+    restoreSnapshot: null,
+    restoring: true,
+    autoRefreshAfterSubmit: true,
+    scrollTop: 0,
+    pendingSubmit: null,
+    reloadStarted: false,
   };
+
+  // This is per-tab extension session state (not an Annex cookie or a Marks Portal token).
+  // The session is reconstructed whenever Annex performs a full document navigation.
+  let saveTimer = null;
+  let formMonitor = null;
+  let successCheckTimer = null;
+  const SAVE_DELAY_MS = 170;
+  const SUCCESS_TEXT = /(?:attendance\s+(?:submitted|saved|added)\s+successfully|(?:successfully\s+(?:submitted|saved|added)\s+attendance))/i;
 
   const txt = (v) => String(v ?? "").replace(/\s+/g, " ").trim();
   const low = (v) => txt(v).toLowerCase();
@@ -52,6 +66,173 @@
     return response.data;
   }
 
+  function getUiSnapshot() {
+    const intake = document.getElementById("bap-intake-filter");
+    const section = document.getElementById("bap-section-filter");
+    const course = document.getElementById("bap-course-filter");
+    const list = document.querySelector("#bap-body .bap-scroll");
+    return {
+      version: 2,
+      username: state.profile?.username || state.restoreSnapshot?.username || "",
+      panelOpen: state.panelOpen,
+      intake: intake?.value ?? state.restoreSnapshot?.intake ?? "",
+      section: section?.value ?? state.restoreSnapshot?.section ?? "",
+      courseId: course?.value ?? state.selectedCourseId ?? "",
+      activeSessionKey: state.activeSessionKey,
+      dateFrom: document.getElementById("bap-date-from")?.value ?? state.restoreSnapshot?.dateFrom ?? "",
+      dateTo: document.getElementById("bap-date-to")?.value ?? state.restoreSnapshot?.dateTo ?? "",
+      expandedDates: [...state.expandedDates],
+      scrollTop: list?.scrollTop ?? state.scrollTop,
+      autoRefreshAfterSubmit: state.autoRefreshAfterSubmit,
+    };
+  }
+
+  async function persistUiStateNow() {
+    if (state.restoring) return;
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = null;
+    try {
+      await send("BAP_SET_UI_STATE", { state: getUiSnapshot() });
+    } catch (error) {
+      // A temporary storage error must never interrupt manual Annex attendance work.
+      addLog(`Could not save drawer preferences: ${error?.message || error}`);
+    }
+  }
+
+  function scheduleSaveUiState() {
+    if (state.restoring || state.reloadStarted) return;
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => { persistUiStateNow(); }, SAVE_DELAY_MS);
+  }
+
+  async function restoreUiState() {
+    try {
+      const saved = await send("BAP_GET_UI_STATE");
+      if (!saved || saved.version !== 2) return;
+      state.restoreSnapshot = saved;
+      state.panelOpen = Boolean(saved.panelOpen);
+      state.selectedCourseId = String(saved.courseId || "");
+      state.activeSessionKey = String(saved.activeSessionKey || "");
+      state.expandedDates = new Set(Array.isArray(saved.expandedDates) ? saved.expandedDates : []);
+      state.scrollTop = Math.max(0, Number(saved.scrollTop) || 0);
+      state.autoRefreshAfterSubmit = saved.autoRefreshAfterSubmit !== false;
+    } catch (_) {
+      // The extension is still usable if persistent session storage is unavailable.
+    }
+  }
+
+  function restoreAppFields() {
+    const snapshot = state.restoreSnapshot;
+    if (!snapshot) return;
+    const from = document.getElementById("bap-date-from");
+    const to = document.getElementById("bap-date-to");
+    const checkbox = document.getElementById("bap-auto-refresh");
+    if (from) from.value = snapshot.dateFrom || "";
+    if (to) to.value = snapshot.dateTo || "";
+    if (checkbox) checkbox.checked = state.autoRefreshAfterSubmit;
+    const scroller = document.querySelector("#bap-body .bap-scroll");
+    if (scroller) scroller.scrollTop = state.scrollTop;
+  }
+
+  function isExtensionNode(node) {
+    const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+    return Boolean(element?.closest?.("#bap-panel, #bap-launcher"));
+  }
+
+  function successNodeInAnnex(node) {
+    const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+    if (!element || isExtensionNode(element)) return false;
+    const text = txt(element.textContent);
+    return text.length <= 240 && SUCCESS_TEXT.test(text);
+  }
+
+  // Only react to a NEW confirmation after an actual user click on Annex Submit.
+  // A pre-existing 'submitted successfully' label never triggers a refresh by itself.
+  function isFreshSuccessMutation(mutation) {
+    if (isExtensionNode(mutation.target)) return false;
+    if (mutation.type === "characterData" && successNodeInAnnex(mutation.target)) return true;
+    if (mutation.type !== "childList") return false;
+    if ([...mutation.addedNodes].some((node) => {
+      if (successNodeInAnnex(node)) return true;
+      if (node.nodeType !== Node.ELEMENT_NODE || isExtensionNode(node)) return false;
+      return Boolean([...node.querySelectorAll("div, p, span, small, td, strong, label")].find(successNodeInAnnex));
+    })) return true;
+    // Some Annex code rewrites only the text inside an existing success container.
+    return successNodeInAnnex(mutation.target) && mutation.addedNodes.length > 0;
+  }
+
+  function isAnnexSubmitControl(element) {
+    const control = element?.closest?.('button, input[type="submit"], input[type="button"]');
+    if (!control || isExtensionNode(control)) return false;
+    const text = low([control.textContent, control.value, control.name, control.id].filter(Boolean).join(" "));
+    return /\bsubmit\b|\bsave\s+attendance\b/.test(text);
+  }
+
+  function beginAnnexSubmitWatch() {
+    if (!state.profile || !state.selectedCourseId || state.busy || state.reloadStarted) return;
+    if (state.pendingSubmit?.timer) clearTimeout(state.pendingSubmit.timer);
+    const started = Date.now();
+    const pending = { started, timer: null, confirmed: false };
+    pending.timer = setTimeout(() => {
+      if (state.pendingSubmit === pending) state.pendingSubmit = null;
+    }, 45000);
+    state.pendingSubmit = pending;
+    scheduleSaveUiState();
+    addLog("Annex Submit detected; waiting for Annex success confirmation.");
+  }
+
+  async function confirmAnnexSubmission() {
+    const pending = state.pendingSubmit;
+    if (!pending || pending.confirmed || state.reloadStarted) return;
+    if (Date.now() - pending.started > 45000) return;
+    pending.confirmed = true;
+    clearTimeout(pending.timer);
+    state.pendingSubmit = null;
+    addLog("Annex confirmed successful submission.");
+    if (!state.autoRefreshAfterSubmit) {
+      setStatus("ok", "Annex confirmed the attendance. You can fill another date, or refresh Annex using the button below.");
+      return;
+    }
+    setStatus("working", "Attendance saved in Annex. Refreshing Annex and restoring your selection…");
+    await refreshAnnex({ reason: "confirmed submit" });
+  }
+
+  async function refreshAnnex({ reason = "manual" } = {}) {
+    if (state.reloadStarted) return;
+    if (state.busy) {
+      setStatus("bad", "Please wait until the current fill finishes before refreshing Annex.");
+      return;
+    }
+    if (saveTimer) clearTimeout(saveTimer);
+    // Save before changing documents. Otherwise selection, active date and scroll position are lost.
+    await persistUiStateNow();
+    state.reloadStarted = true;
+    addLog(`Refreshing Annex (${reason}) while keeping the assistant session.`);
+    window.location.reload();
+  }
+
+  function installAnnexSubmitMonitor() {
+    document.addEventListener("click", (event) => {
+      if (isAnnexSubmitControl(event.target)) beginAnnexSubmitWatch();
+      else if (state.panelOpen && !isExtensionNode(event.target)) {
+        // Clicking the page away from Submit closes the drawer, as does the X button.
+        togglePanel(false);
+      }
+    }, true);
+    document.addEventListener("submit", (event) => {
+      if (!isExtensionNode(event.target) && !state.pendingSubmit) beginAnnexSubmitWatch();
+    }, true);
+
+    formMonitor = new MutationObserver((mutations) => {
+      if (!state.pendingSubmit || !state.autoRefreshAfterSubmit) return;
+      if (mutations.some(isFreshSuccessMutation)) {
+        if (successCheckTimer) clearTimeout(successCheckTimer);
+        successCheckTimer = setTimeout(confirmAnnexSubmission, 160);
+      }
+    });
+    formMonitor.observe(document.documentElement, { subtree: true, childList: true, characterData: true });
+  }
+
   function labelTextFor(el) {
     if (!el) return "";
     const labels = [];
@@ -78,8 +259,17 @@
     return low(pieces.filter(Boolean).join(" | "));
   }
 
+  // Never mistake the assistant's own filters for Annex form controls.
+  function annexElements(selector) {
+    return Array.from(document.querySelectorAll(selector)).filter((element) => !isExtensionNode(element));
+  }
+
+  function firstAnnexElement(selector) {
+    return annexElements(selector)[0] || null;
+  }
+
   function allSelects() {
-    return Array.from(document.querySelectorAll("select"));
+    return annexElements("select");
   }
 
   function findCourseControl() {
@@ -87,27 +277,27 @@
     return selects.find((select) => /select\s*course|course/.test(signature(select)) &&
       Array.from(select.options || []).some((option) => /\b[A-Z]{2,8}\s*-?\s*\d{3,4}\b/i.test(txt(option.textContent))))
       || selects.find((select) => Array.from(select.options || []).filter((option) => /\b[A-Z]{2,8}\s*-?\s*\d{3,4}\b/i.test(txt(option.textContent))).length >= 2)
-      || document.querySelector('input[placeholder*="Course" i], input[name*="course" i], input[id*="course" i]');
+      || firstAnnexElement('input[placeholder*="Course" i], input[name*="course" i], input[id*="course" i]');
   }
 
   function findIntakeControl() {
     return allSelects().find((select) => /intake/.test(signature(select)))
-      || document.querySelector('input[placeholder*="Intake" i], input[name*="intake" i], input[id*="intake" i]');
+      || firstAnnexElement('input[placeholder*="Intake" i], input[name*="intake" i], input[id*="intake" i]');
   }
 
   function findSectionControl() {
     return allSelects().find((select) => /section/.test(signature(select)))
-      || document.querySelector('input[placeholder*="Section" i], input[name*="section" i], input[id*="section" i]');
+      || firstAnnexElement('input[placeholder*="Section" i], input[name*="section" i], input[id*="section" i]');
   }
 
   function findPeriodControl() {
     return allSelects().find((select) => /no\s*of\s*class|number\s*of\s*class|period/.test(signature(select)))
-      || document.querySelector('input[placeholder*="No of Class" i], input[name*="class" i], input[id*="class" i], input[type="number"]');
+      || firstAnnexElement('input[placeholder*="No of Class" i], input[name*="class" i], input[id*="class" i], input[type="number"]');
   }
 
   function findDateControl() {
-    return document.querySelector('input[type="date"]')
-      || Array.from(document.querySelectorAll("input")).find((input) => /date/.test(signature(input)));
+    return firstAnnexElement('input[type="date"]')
+      || annexElements("input").find((input) => /date/.test(signature(input)));
   }
 
   function scanForm() {
@@ -365,6 +555,7 @@
       if (!rows) throw new Error("Annex student list did not load after selecting the attendance.");
       const result = applyAttendanceSession(session);
       state.activeSessionKey = session.key;
+      scheduleSaveUiState();
       renderAttendanceList();
       setStatus("ok", `${session.date} · Period ${session.period} is filled on-screen. ${result.present} Present, ${result.absent} Absent. Review it, then use Annex Submit yourself.`);
     } catch (error) {
@@ -392,6 +583,7 @@
       if (!rows) throw new Error("Annex student list did not load after selecting the attendance.");
       const result = applyAttendanceSession(group.sessions[0]);
       state.activeSessionKey = group.sessions[group.sessions.length - 1].key;
+      scheduleSaveUiState();
       renderAttendanceList();
       setStatus("ok", `${group.date} is filled as ${group.sessions.length} periods because the selected periods have the same attendance. ${result.present} Present, ${result.absent} Absent. Submit manually in Annex after checking.`);
     } catch (error) {
@@ -442,6 +634,7 @@
         delete control.dataset.bapDisabledBeforeBusy;
       }
     });
+    if (!value && state.attendance) renderAttendanceList();
   }
 
   function setStatus(kind, message) {
@@ -487,15 +680,15 @@
     if (values.includes(selectedValue)) select.value = selectedValue;
   }
 
-  function refreshCourseFilters({ preserve = true } = {}) {
+  function refreshCourseFilters({ preserve = true, restore = null } = {}) {
     const intakeSelect = document.getElementById("bap-intake-filter");
     const sectionSelect = document.getElementById("bap-section-filter");
     const courseSelect = document.getElementById("bap-course-filter");
     if (!intakeSelect || !sectionSelect || !courseSelect) return;
 
-    const previousIntake = preserve ? intakeSelect.value : "";
-    const previousSection = preserve ? sectionSelect.value : "";
-    const previousCourse = preserve ? courseSelect.value : state.selectedCourseId;
+    const previousIntake = restore ? String(restore.intake || "") : preserve ? intakeSelect.value : "";
+    const previousSection = restore ? String(restore.section || "") : preserve ? sectionSelect.value : "";
+    const previousCourse = restore ? String(restore.courseId || "") : preserve ? courseSelect.value : state.selectedCourseId;
 
     const intakes = uniqueSorted(state.courses.map((course) => course.intake || ""));
     setOptions(intakeSelect, intakes, "Select intake", previousIntake);
@@ -522,22 +715,48 @@
     try {
       const courses = await send("BAP_GET_COURSES");
       state.courses = Array.isArray(courses) ? courses : [];
-      refreshCourseFilters({ preserve: false });
-      setStatus("ok", state.courses.length ? "Choose Intake → Section → Course. Attendance will load directly from the Marks Portal server." : "No active courses were found for this teacher account.");
+      const saved = state.restoreSnapshot;
+      const sameUser = !saved?.username || saved.username === state.profile?.username;
+      if (saved && !sameUser) {
+        state.restoreSnapshot = null;
+        state.selectedCourseId = "";
+        state.activeSessionKey = "";
+        state.expandedDates.clear();
+      }
+      refreshCourseFilters({ preserve: false, restore: sameUser ? saved : null });
+      if (state.selectedCourseId) {
+        await loadAttendance(state.selectedCourseId, { preserveActive: true });
+        const scroller = document.querySelector("#bap-body .bap-scroll");
+        if (scroller && saved) {
+          state.scrollTop = Math.max(0, Number(saved.scrollTop) || 0);
+          scroller.scrollTop = state.scrollTop;
+        }
+        addLog("Course, filters and last attendance restored after Annex refresh.");
+      } else {
+        setStatus("ok", state.courses.length ? "Choose Intake → Section → Course. Your choices will be kept when Annex refreshes." : "No active courses were found for this teacher account.");
+      }
+      state.restoring = false;
+      state.restoreSnapshot = null;
+      scheduleSaveUiState();
     } catch (error) {
       handleActionError(error, "Could not load courses.");
+    } finally {
+      state.restoring = false;
     }
   }
 
-  async function loadAttendance(courseId) {
+  async function loadAttendance(courseId, { preserveActive = false } = {}) {
     if (!courseId) {
       state.attendance = null;
       state.selectedCourseId = "";
       renderAttendanceList();
       return;
     }
+    if (String(state.selectedCourseId) !== String(courseId) || !preserveActive) {
+      state.activeSessionKey = "";
+    }
     state.selectedCourseId = courseId;
-    state.activeSessionKey = "";
+    scheduleSaveUiState();
     setStatus("working", "Loading attendance from Marks Portal…");
     try {
       const sheet = await send("BAP_GET_ATTENDANCE_SHEET", { courseId });
@@ -634,14 +853,14 @@
       const count = group.sessions.length;
       const periodText = group.sessions.map((session) => `P${session.period}`).join(" · ");
       const combinedAction = count > 1 && group.identical
-        ? `<button class="bap-session-action primary" type="button" data-fill-group="${esc(group.date)}">
+        ? `<button class="bap-session-action primary" type="button" data-fill-group="${esc(group.date)}" ${state.busy ? "disabled" : ""}>
              <span>Fill ${count} periods</span><span class="bap-action-arrow">→</span>
            </button>`
         : count === 1
-          ? `<button class="bap-session-action primary" type="button" data-fill-session="${esc(group.sessions[0].key)}">
+          ? `<button class="bap-session-action primary" type="button" data-fill-session="${esc(group.sessions[0].key)}" ${state.busy ? "disabled" : ""}>
                <span>Fill period ${esc(group.sessions[0].period)}</span><span class="bap-action-arrow">→</span>
              </button>`
-          : `<button class="bap-session-action secondary" type="button" data-toggle-date="${esc(group.date)}">
+          : `<button class="bap-session-action secondary" type="button" data-toggle-date="${esc(group.date)}" ${state.busy ? "disabled" : ""}>
                <span>Choose period</span><span class="bap-action-arrow">↓</span>
              </button>`;
 
@@ -676,7 +895,7 @@
           </div>
 
           ${count > 1 ? `
-            <button class="bap-period-toggle" type="button" data-toggle-date="${esc(group.date)}" aria-expanded="${isExpanded}">
+            <button class="bap-period-toggle" type="button" data-toggle-date="${esc(group.date)}" aria-expanded="${isExpanded}" ${state.busy ? "disabled" : ""}>
               <span class="bap-period-toggle-copy">
                 <strong>Period-wise options</strong>
                 <small>Open to fill an individual period instead</small>
@@ -699,7 +918,7 @@
                       </div>
                       <span>${counts.present} present · ${counts.absent} absent${counts.unknown ? ` · ${counts.unknown} unknown` : ""}</span>
                     </div>
-                    <button class="bap-period-fill" type="button" data-fill-session="${esc(session.key)}">Fill</button>
+                    <button class="bap-period-fill" type="button" data-fill-session="${esc(session.key)}" ${state.busy ? "disabled" : ""}>Fill</button>
                   </div>`;
               }).join("")}
             </div>
@@ -713,6 +932,7 @@
       if (!group || group.sessions.length <= 1) return;
       if (state.expandedDates.has(date)) state.expandedDates.delete(date);
       else state.expandedDates.add(date);
+      scheduleSaveUiState();
       renderAttendanceList();
     }));
 
@@ -746,7 +966,18 @@
       state.courses = [];
       state.attendance = null;
       state.log = [];
+      // If Annex refreshed while the token expired, restore only for the same teacher.
+      const saved = state.restoreSnapshot;
+      const sameUser = Boolean(saved && (!saved.username || saved.username === data.profile?.username));
+      if (!sameUser) {
+        state.restoreSnapshot = null;
+        state.selectedCourseId = "";
+        state.activeSessionKey = "";
+        state.expandedDates.clear();
+      }
+      state.restoring = sameUser;
       renderApp();
+      if (!sameUser) scheduleSaveUiState();
       addLog(`Logged in as ${state.profile?.name || username}.`);
       await loadCourses();
     } catch (error) {
@@ -776,6 +1007,9 @@
     state.attendance = null;
     state.activeSessionKey = "";
     state.log = [];
+    state.restoreSnapshot = null;
+    state.restoring = false;
+    try { await send("BAP_CLEAR_UI_STATE"); } catch (_) {}
     renderApp();
   }
 
@@ -833,7 +1067,10 @@
 
         <section class="bap-workflow-card compact">
           <div class="bap-step-label"><span>01</span><div><strong>Annex form</strong><small>Verify that New Attendance is open</small></div></div>
-          <button id="bap-rescan" class="bap-icon-text-btn" type="button">Rescan</button>
+          <div class="bap-form-buttons">
+            <button id="bap-rescan" class="bap-icon-text-btn" type="button">Rescan</button>
+            <button id="bap-refresh-annex" class="bap-icon-text-btn bap-refresh-top" type="button" title="Reload Annex, keep the open assistant and course selection">↻ Refresh</button>
+          </div>
           <div id="bap-form-state" class="bap-inline-state">Scanning…</div>
         </section>
 
@@ -878,9 +1115,15 @@
           <div id="bap-status" class="bap-state">Loading your courses…</div>
           <div id="bap-attendance-list" class="bap-attendance-list"></div>
 
+          <div class="bap-refresh-options">
+            <label class="bap-refresh-toggle" for="bap-auto-refresh">
+              <span class="bap-refresh-copy"><strong>Ready for the next date</strong><small>Refresh Annex after a confirmed successful manual submission. Keep your course and open drawer.</small></span>
+              <input id="bap-auto-refresh" type="checkbox" checked aria-label="Auto-refresh Annex after successful submit" />
+            </label>
+          </div>
           <div class="bap-manual-note">
             <span class="bap-manual-icon">✓</span>
-            <div><strong>Manual submit stays enabled</strong><small>Review the filled checkboxes in Annex and press Submit yourself.</small></div>
+            <div><strong>Manual submit stays enabled</strong><small>Check Annex attendance and click its Submit button yourself. Never auto-submitted.</small></div>
           </div>
 
           <details class="bap-debug">
@@ -893,6 +1136,17 @@
     document.getElementById("bap-logout")?.addEventListener("click", logout);
     document.getElementById("bap-rescan")?.addEventListener("click", renderFormState);
     document.getElementById("bap-next")?.addEventListener("click", fillNextAttendance);
+    document.getElementById("bap-refresh-annex")?.addEventListener("click", () => refreshAnnex());
+    document.getElementById("bap-auto-refresh")?.addEventListener("change", (event) => {
+      state.autoRefreshAfterSubmit = Boolean(event.target.checked);
+      scheduleSaveUiState();
+    });
+    const scroller = document.querySelector("#bap-body .bap-scroll");
+    scroller?.addEventListener("scroll", () => {
+      if (state.restoring) return;
+      state.scrollTop = scroller.scrollTop;
+      scheduleSaveUiState();
+    }, { passive: true });
 
     const intake = document.getElementById("bap-intake-filter");
     const section = document.getElementById("bap-section-filter");
@@ -906,6 +1160,7 @@
       refreshCourseFilters();
       renderAttendanceSummary();
       renderAttendanceList();
+      scheduleSaveUiState();
     });
 
     section?.addEventListener("change", () => {
@@ -915,13 +1170,15 @@
       refreshCourseFilters();
       renderAttendanceSummary();
       renderAttendanceList();
+      scheduleSaveUiState();
     });
 
     course?.addEventListener("change", () => loadAttendance(course.value));
-    document.getElementById("bap-date-from")?.addEventListener("change", renderAttendanceList);
-    document.getElementById("bap-date-to")?.addEventListener("change", renderAttendanceList);
+    document.getElementById("bap-date-from")?.addEventListener("change", () => { renderAttendanceList(); scheduleSaveUiState(); });
+    document.getElementById("bap-date-to")?.addEventListener("change", () => { renderAttendanceList(); scheduleSaveUiState(); });
 
     refreshCourseFilters();
+    restoreAppFields();
     renderFormState();
     renderAttendanceSummary();
     renderAttendanceList();
@@ -963,7 +1220,7 @@
 
     const panel = document.createElement("aside");
     panel.id = "bap-panel";
-    panel.className = "bap-hidden";
+    panel.className = state.panelOpen ? "" : "bap-hidden";
     panel.innerHTML = `
       <header class="bap-head">
         <div class="bap-head-main">
@@ -993,11 +1250,18 @@
     state.panelOpen = open ?? panel.classList.contains("bap-hidden");
     panel.classList.toggle("bap-hidden", !state.panelOpen);
     if (state.panelOpen && state.profile) renderFormState();
+    scheduleSaveUiState();
   }
 
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type === "BAP_TOGGLE_PANEL") togglePanel();
   });
 
-  injectUi();
+  async function initialize() {
+    await restoreUiState();
+    injectUi();
+    installAnnexSubmitMonitor();
+  }
+
+  initialize();
 })();

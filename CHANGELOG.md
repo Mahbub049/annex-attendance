@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.0 — Seamless next-date attendance
+- Remember drawer open/closed state, teacher-specific Intake, Section, Course, date filters, expanded periods, last filled session and scroll position while the Annex tab remains open.
+- Restore the saved course and reload its Marks Portal attendance after full Annex navigation or manual browser refresh. State is stored privately in extension per-tab session storage.
+- Detect newly displayed Annex success confirmation after the teacher manually clicks Submit; refresh Annex automatically only after that fresh success signal, never on the click alone.
+- Provide an always-available Refresh button next to Annex form Rescan if Annex does not show a detectable success message.
+- Allow users to turn automatic post-success refresh off, without changing the manual submission policy.
+- Close drawer on ordinary outside clicks, but not on Annex Submit; remember closed state across refresh.
+- Prevent extension dropdowns from being mistaken for Annex form controls and disable attendance fill buttons during a running fill operation.
+- Keep all Annex submissions manual; no Annex submission code or API call added.
+
 ## 1.2.0
 - Full premium UI redesign: modern SaaS drawer, refined spacing, typography, surfaces, and micro-interactions.
 - Rebuilt attendance sessions as professional cards with date blocks, compact status, and clearer primary actions.

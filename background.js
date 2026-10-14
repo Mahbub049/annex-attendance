@@ -1,5 +1,12 @@
 const API_BASE_URL = "https://course-management-server-1l1s.onrender.com/api";
 const AUTH_KEY = "bap_server_auth_v1";
+const UI_STATE_PREFIX = "bap_ui_state_tab_v2_";
+
+function stateKeyFor(sender) {
+  const id = sender?.tab?.id;
+  if (!Number.isInteger(id)) throw new Error("Attendance Assistant tab was not available.");
+  return `${UI_STATE_PREFIX}${id}`;
+}
 
 async function getStoredAuth() {
   const saved = await chrome.storage.local.get(AUTH_KEY);
@@ -72,8 +79,41 @@ async function requireAuth() {
   return auth;
 }
 
-async function handleRequest(message) {
+async function handleRequest(message, sender) {
   switch (message?.type) {
+    case "BAP_GET_UI_STATE": {
+      const key = stateKeyFor(sender);
+      return (await chrome.storage.session.get(key))[key] || null;
+    }
+
+    case "BAP_SET_UI_STATE": {
+      const key = stateKeyFor(sender);
+      const ui = message?.state;
+      if (!ui || ui.version !== 2) throw new Error("Invalid attendance assistant UI state.");
+      // Do not store passwords, bearer tokens, student roll lists, or attendance in UI state.
+      const safe = {
+        version: 2,
+        username: String(ui.username || "").slice(0, 160),
+        panelOpen: Boolean(ui.panelOpen),
+        intake: String(ui.intake || "").slice(0, 80),
+        section: String(ui.section || "").slice(0, 80),
+        courseId: String(ui.courseId || "").slice(0, 160),
+        activeSessionKey: String(ui.activeSessionKey || "").slice(0, 200),
+        dateFrom: String(ui.dateFrom || "").slice(0, 12),
+        dateTo: String(ui.dateTo || "").slice(0, 12),
+        expandedDates: (Array.isArray(ui.expandedDates) ? ui.expandedDates : []).slice(0, 200).map((d) => String(d).slice(0, 12)),
+        scrollTop: Math.max(0, Math.min(100000, Number(ui.scrollTop) || 0)),
+        autoRefreshAfterSubmit: ui.autoRefreshAfterSubmit !== false,
+      };
+      await chrome.storage.session.set({ [key]: safe });
+      return { saved: true };
+    }
+
+    case "BAP_CLEAR_UI_STATE": {
+      await chrome.storage.session.remove(stateKeyFor(sender));
+      return { cleared: true };
+    }
+
     case "BAP_LOGIN": { 
       await warmUpApi();
       const data = await apiFetch("/auth/login", {
@@ -149,10 +189,10 @@ async function handleRequest(message) {
   }
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message?.type?.startsWith("BAP_")) return undefined;
 
-  handleRequest(message)
+  handleRequest(message, sender)
     .then((data) => sendResponse({ ok: true, data }))
     .catch((error) => {
       sendResponse({
@@ -172,4 +212,9 @@ chrome.action.onClicked.addListener(async (tab) => {
   } catch (_) {
     // Content script becomes available after the Annex page finishes loading.
   }
+});
+
+// Keep extension UI state only while its Annex tab exists; avoid cross-tab mixups.
+chrome.tabs.onRemoved.addListener((tabId) => {
+  chrome.storage.session.remove(`${UI_STATE_PREFIX}${tabId}`).catch(() => {});
 });
