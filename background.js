@@ -102,6 +102,17 @@ async function handleRequest(message, sender) {
         dateFrom: String(ui.dateFrom || "").slice(0, 12),
         dateTo: String(ui.dateTo || "").slice(0, 12),
         expandedDates: (Array.isArray(ui.expandedDates) ? ui.expandedDates : []).slice(0, 200).map((d) => String(d).slice(0, 12)),
+        // Only course IDs, session keys and progress flags; no student records are stored.
+        progressByCourse: Object.fromEntries(
+          Object.entries(ui.progressByCourse && typeof ui.progressByCourse === "object" ? ui.progressByCourse : {})
+            .slice(0, 40)
+            .map(([id, rows]) => [String(id).slice(0, 160), Object.fromEntries(
+              Object.entries(rows && typeof rows === "object" ? rows : {})
+                .slice(0, 400)
+                .filter(([, status]) => status === "filled" || status === "submitted")
+                .map(([key, status]) => [String(key).slice(0, 200), status])
+            )])
+        ),
         scrollTop: Math.max(0, Math.min(100000, Number(ui.scrollTop) || 0)),
         autoRefreshAfterSubmit: ui.autoRefreshAfterSubmit !== false,
       };

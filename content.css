@@ -245,3 +245,27 @@
   .bap-workflow-card.compact { grid-template-columns: 1fr; }
   .bap-workflow-card.compact .bap-form-buttons { justify-content: flex-start; }
 }
+
+/* v1.4.0 — quiet green completion markers (per date and per period). */
+.bap-date-day { position: relative; overflow: visible; }
+.bap-date-day.bap-date-filled { border-color: #a9d9bc; background: #f3faf5; color: #286b47; }
+.bap-date-tick { position: absolute; top: -7px; right: -7px; display: grid; place-items: center;
+  width: 19px; height: 19px; border: 2px solid white; border-radius: 50%; background: #2f9862;
+  color: white; font-size: 11px; line-height: 1; font-weight: 900; box-shadow: 0 1px 4px rgba(21,91,50,.13); }
+.bap-session-card.bap-all-filled { border-color: #cde5d4; }
+.bap-progress-pill { display: inline-flex; align-items: center; border: 1px solid #cde6d7;
+  border-radius: 6px; background: #f1faf4; color: #307a50; padding: 2px 5px; font-size: 9px; font-weight: 800; }
+.bap-session-meta { flex-wrap: wrap; white-space: normal; }
+.bap-period-number { position: relative; }
+.bap-mini-tick { position: absolute; top: -6px; right: -5px; display: grid; place-items: center;
+  width: 15px; height: 15px; border: 1.5px solid #fff; border-radius: 50%; background: #2f9862;
+  color: #fff; font-size: 9px; line-height: 1; font-weight: 900; }
+.bap-row-filled .bap-period-number { background: #e9f7ef; color: #25724b; }
+.bap-period-title { flex-wrap: wrap; }
+.bap-progress-label { padding: 3px 6px; border-radius: 6px; border: 1px solid #e8dfb7;
+  background: #fdf9ec; color: #886b29; font-size: 8px; line-height: 1.2; font-weight: 800; }
+.bap-progress-label.submitted { background: #eefaef; color: #2b7950; border-color: #cbe5d4; }
+.bap-progress-hint { display: flex; gap: 8px; align-items: flex-start; margin: 0 0 10px; color: #708072;
+  font-size: 9px; line-height: 1.5; }
+.bap-hint-check { flex: 0 0 auto; display: grid; place-items: center; width: 16px; height: 16px;
+  border-radius: 50%; color: #fff; background: #2f9862; font-size: 10px; font-weight: 900; }

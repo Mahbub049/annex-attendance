@@ -12,6 +12,9 @@
     attendance: null,
     activeSessionKey: "",
     expandedDates: new Set(),
+    // Per-course session progress; remembers Fill vs Annex-confirmed Submit.
+    progressByCourse: {},
+    pendingFill: null,
     busy: false,
     log: [],
     restoreSnapshot: null,
@@ -82,6 +85,7 @@
       dateFrom: document.getElementById("bap-date-from")?.value ?? state.restoreSnapshot?.dateFrom ?? "",
       dateTo: document.getElementById("bap-date-to")?.value ?? state.restoreSnapshot?.dateTo ?? "",
       expandedDates: [...state.expandedDates],
+      progressByCourse: state.progressByCourse,
       scrollTop: list?.scrollTop ?? state.scrollTop,
       autoRefreshAfterSubmit: state.autoRefreshAfterSubmit,
     };
@@ -114,6 +118,7 @@
       state.selectedCourseId = String(saved.courseId || "");
       state.activeSessionKey = String(saved.activeSessionKey || "");
       state.expandedDates = new Set(Array.isArray(saved.expandedDates) ? saved.expandedDates : []);
+      state.progressByCourse = saved.progressByCourse && typeof saved.progressByCourse === "object" ? saved.progressByCourse : {};
       state.scrollTop = Math.max(0, Number(saved.scrollTop) || 0);
       state.autoRefreshAfterSubmit = saved.autoRefreshAfterSubmit !== false;
     } catch (_) {
@@ -168,11 +173,70 @@
     return /\bsubmit\b|\bsave\s+attendance\b/.test(text);
   }
 
+  // Status is a local progress marker, NOT a claim that Annex accepted a submission.
+  // Only Annex's fresh success confirmation may change "filled" -> "submitted".
+  function getSessionProgress(sessionKey, courseId = state.selectedCourseId) {
+    return state.progressByCourse[String(courseId)]?.[String(sessionKey)] || "";
+  }
+
+  function markSessionsFilled(sessions) {
+    const courseId = String(state.selectedCourseId || "");
+    if (!courseId) return;
+    const courseProgress = { ...(state.progressByCourse[courseId] || {}) };
+    for (const session of sessions) courseProgress[String(session.key)] = "filled";
+    state.progressByCourse = { ...state.progressByCourse, [courseId]: courseProgress };
+    state.pendingFill = { courseId, keys: sessions.map((session) => String(session.key)) };
+    scheduleSaveUiState();
+  }
+
+  function markAnnexSubmissionConfirmed(submission) {
+    const fill = submission?.fill;
+    if (!fill?.courseId || !Array.isArray(fill.keys) || !fill.keys.length) return;
+    const courseProgress = { ...(state.progressByCourse[fill.courseId] || {}) };
+    fill.keys.forEach((key) => { courseProgress[key] = "submitted"; });
+    state.progressByCourse = { ...state.progressByCourse, [fill.courseId]: courseProgress };
+    state.pendingFill = null;
+    renderAttendanceList();
+    scheduleSaveUiState();
+  }
+
+  // Scroll the ANNEX document (not the floating extension list) to its Submit control.
+  // This helper never clicks or submits the form on the faculty's behalf.
+  function scrollToAnnexSubmit() {
+    const table = findAttendanceTable()?.table;
+    const form = table?.closest("form");
+    const controls = annexElements('button, input[type="submit"], input[type="button"], a[role="button"], a.btn');
+    const candidates = controls.filter((element) => {
+      if (element.disabled || element.getAttribute("aria-hidden") === "true") return false;
+      const style = window.getComputedStyle(element);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      const label = low([element.innerText, element.textContent, element.value, element.getAttribute("aria-label")].filter(Boolean).join(" "));
+      return /\bsubmit\b|\bsave\s+attendance\b/.test(label);
+    });
+    const inForm = form ? candidates.filter((element) => form.contains(element)) : [];
+    // Prefer the button under the attendance table, where Annex renders its own Submit.
+    const belowTable = table ? candidates.filter((element) =>
+      (table.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0) : [];
+    const target = inForm.at(-1) || belowTable.at(-1) || candidates.at(-1);
+    if (target) {
+      target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+      addLog("Annex scrolled to the manual Submit button.");
+      return true;
+    }
+    // Some versions of Annex use a different button label: at least show the table bottom.
+    if (table) {
+      const bottom = table.lastElementChild || table;
+      bottom.scrollIntoView({ behavior: "smooth", block: "end", inline: "nearest" });
+      addLog("Annex student list scrolled down; locate the Submit button below.");
+    }
+    return false;
+  }
+
   function beginAnnexSubmitWatch() {
     if (!state.profile || !state.selectedCourseId || state.busy || state.reloadStarted) return;
     if (state.pendingSubmit?.timer) clearTimeout(state.pendingSubmit.timer);
     const started = Date.now();
-    const pending = { started, timer: null, confirmed: false };
+    const pending = { started, timer: null, confirmed: false, fill: state.pendingFill ? { courseId: state.pendingFill.courseId, keys: [...state.pendingFill.keys] } : null };
     pending.timer = setTimeout(() => {
       if (state.pendingSubmit === pending) state.pendingSubmit = null;
     }, 45000);
@@ -189,6 +253,7 @@
     clearTimeout(pending.timer);
     state.pendingSubmit = null;
     addLog("Annex confirmed successful submission.");
+    markAnnexSubmissionConfirmed(pending);
     if (!state.autoRefreshAfterSubmit) {
       setStatus("ok", "Annex confirmed the attendance. You can fill another date, or refresh Annex using the button below.");
       return;
@@ -224,7 +289,7 @@
     }, true);
 
     formMonitor = new MutationObserver((mutations) => {
-      if (!state.pendingSubmit || !state.autoRefreshAfterSubmit) return;
+      if (!state.pendingSubmit) return;
       if (mutations.some(isFreshSuccessMutation)) {
         if (successCheckTimer) clearTimeout(successCheckTimer);
         successCheckTimer = setTimeout(confirmAnnexSubmission, 160);
@@ -549,15 +614,17 @@
     try {
       await ensureBaseSelection();
       await setDate(session.date);
-      await setPeriod(session.period);
+      // Annex No. of Class means quantity submitted, not the Marks Portal period index.
+      await setPeriod(1);
       await sleep(250);
       const rows = await waitForStudentRows();
       if (!rows) throw new Error("Annex student list did not load after selecting the attendance.");
       const result = applyAttendanceSession(session);
       state.activeSessionKey = session.key;
-      scheduleSaveUiState();
+      markSessionsFilled([session]);
       renderAttendanceList();
-      setStatus("ok", `${session.date} · Period ${session.period} is filled on-screen. ${result.present} Present, ${result.absent} Absent. Review it, then use Annex Submit yourself.`);
+      scrollToAnnexSubmit();
+      setStatus("ok", `${session.date} · Period ${session.period} filled (No. of Class = 1). ${result.present} Present, ${result.absent} Absent. Review and manually Submit in Annex.`);
     } catch (error) {
       handleActionError(error, "Could not fill this attendance.");
     } finally {
@@ -583,9 +650,10 @@
       if (!rows) throw new Error("Annex student list did not load after selecting the attendance.");
       const result = applyAttendanceSession(group.sessions[0]);
       state.activeSessionKey = group.sessions[group.sessions.length - 1].key;
-      scheduleSaveUiState();
+      markSessionsFilled(group.sessions);
       renderAttendanceList();
-      setStatus("ok", `${group.date} is filled as ${group.sessions.length} periods because the selected periods have the same attendance. ${result.present} Present, ${result.absent} Absent. Submit manually in Annex after checking.`);
+      scrollToAnnexSubmit();
+      setStatus("ok", `${group.date} filled as ${group.sessions.length} classes (identical periods). ${result.present} Present, ${result.absent} Absent. Review and manually Submit in Annex.`);
     } catch (error) {
       handleActionError(error, "Could not fill these periods together.");
     } finally {
@@ -599,13 +667,16 @@
       setStatus("bad", "No attendance is available in the selected date range.");
       return;
     }
-    let index = sessions.findIndex((session) => session.key === state.activeSessionKey);
-    index = index < 0 ? 0 : index + 1;
-    if (index >= sessions.length) {
-      setStatus("ok", "You have reached the last attendance in this filtered list.");
+    // Start just after the previous fill, but skip periods already marked as filled.
+    // On a new page or manually refreshed page, restore the per-course progress.
+    const activeIndex = sessions.findIndex((session) => session.key === state.activeSessionKey);
+    const ordered = activeIndex < 0 ? sessions : [...sessions.slice(activeIndex + 1), ...sessions.slice(0, activeIndex + 1)];
+    const next = ordered.find((session) => !getSessionProgress(session.key));
+    if (!next) {
+      setStatus("ok", "All visible periods have been marked filled. Check that each was manually submitted in Annex; unconfirmed fills are not submissions.");
       return;
     }
-    await fillSession(sessions[index]);
+    await fillSession(next);
   }
 
   function handleActionError(error, fallback) {
@@ -722,6 +793,8 @@
         state.selectedCourseId = "";
         state.activeSessionKey = "";
         state.expandedDates.clear();
+        state.progressByCourse = {};
+        state.pendingFill = null;
       }
       refreshCourseFilters({ preserve: false, restore: sameUser ? saved : null });
       if (state.selectedCourseId) {
@@ -852,6 +925,11 @@
       const date = formatAttendanceDate(group.date);
       const count = group.sessions.length;
       const periodText = group.sessions.map((session) => `P${session.period}`).join(" · ");
+      const completedCount = group.sessions.filter((session) => Boolean(getSessionProgress(session.key))).length;
+      const confirmedCount = group.sessions.filter((session) => getSessionProgress(session.key) === "submitted").length;
+      const progressTitle = confirmedCount === count
+        ? "All periods confirmed submitted in Annex"
+        : `${completedCount}/${count} filled locally; ${confirmedCount} submission(s) confirmed. Verify unconfirmed fills in Annex.`;
       const combinedAction = count > 1 && group.identical
         ? `<button class="bap-session-action primary" type="button" data-fill-group="${esc(group.date)}" ${state.busy ? "disabled" : ""}>
              <span>Fill ${count} periods</span><span class="bap-action-arrow">→</span>
@@ -872,10 +950,13 @@
       const statusClass = count === 1 ? "neutral" : group.identical ? "success" : "warning";
 
       return `
-        <article class="bap-session-card ${isExpanded ? "expanded" : ""}">
+        <article class="bap-session-card ${isExpanded ? "expanded" : ""} ${completedCount === count ? "bap-all-filled" : ""}">
           <div class="bap-session-main">
             <div class="bap-date-block">
-              <div class="bap-date-day">${esc(date.day)}</div>
+              <div class="bap-date-day ${completedCount ? "bap-date-filled" : ""}" title="${esc(progressTitle)}">
+                ${esc(date.day)}
+                ${completedCount ? `<span class="bap-date-tick" aria-label="${completedCount} of ${count} filled">✓</span>` : ""}
+              </div>
               <div class="bap-date-copy">
                 <strong>${esc(date.monthYear)}</strong>
                 <span>${esc(date.weekday)}</span>
@@ -885,6 +966,7 @@
             <div class="bap-session-center">
               <div class="bap-session-status ${statusClass}"><i></i>${esc(statusLabel)}</div>
               <div class="bap-session-meta">
+                ${completedCount ? `<span class="bap-progress-pill" title="${esc(progressTitle)}">✓ ${completedCount}/${count} filled${confirmedCount === count ? " · submitted" : ""}</span>` : ""}
                 <span>${count} ${count === 1 ? "period" : "periods"}</span>
                 <span class="bap-meta-dot">•</span>
                 <span>${esc(periodText)}</span>
@@ -907,14 +989,16 @@
             <div class="bap-period-list-inner">
               ${group.sessions.map((session) => {
                 const active = session.key === state.activeSessionKey;
+                const progress = getSessionProgress(session.key);
                 const counts = sessionCounts(session);
                 return `
-                  <div class="bap-period-row ${active ? "active" : ""}">
-                    <div class="bap-period-number">P${esc(session.period)}</div>
+                  <div class="bap-period-row ${active ? "active" : ""} ${progress ? "bap-row-filled" : ""}">
+                    <div class="bap-period-number">P${esc(session.period)}${progress ? '<span class="bap-mini-tick" aria-label="Filled">✓</span>' : ""}</div>
                     <div class="bap-period-info">
                       <div class="bap-period-title">
                         <strong>Period ${esc(session.period)}</strong>
-                        ${active ? '<span class="bap-row-badge">Last filled</span>' : ''}
+                        ${progress === "submitted" ? '<span class="bap-progress-label submitted">Submitted ✓</span>' : progress ? '<span class="bap-progress-label">Filled · submit pending</span>' : ''}
+                        ${active && !progress ? '<span class="bap-row-badge">Last selected</span>' : ''}
                       </div>
                       <span>${counts.present} present · ${counts.absent} absent${counts.unknown ? ` · ${counts.unknown} unknown` : ""}</span>
                     </div>
@@ -974,6 +1058,8 @@
         state.selectedCourseId = "";
         state.activeSessionKey = "";
         state.expandedDates.clear();
+        state.progressByCourse = {};
+        state.pendingFill = null;
       }
       state.restoring = sameUser;
       renderApp();
@@ -1006,6 +1092,8 @@
     state.selectedCourseId = "";
     state.attendance = null;
     state.activeSessionKey = "";
+    state.progressByCourse = {};
+    state.pendingFill = null;
     state.log = [];
     state.restoreSnapshot = null;
     state.restoring = false;
@@ -1113,6 +1201,7 @@
           </div>
 
           <div id="bap-status" class="bap-state">Loading your courses…</div>
+          <div class="bap-progress-hint"><span class="bap-hint-check">✓</span><span>Green checks remember filled periods across refresh. <strong>Filled ≠ submitted</strong> until Annex confirms success.</span></div>
           <div id="bap-attendance-list" class="bap-attendance-list"></div>
 
           <div class="bap-refresh-options">

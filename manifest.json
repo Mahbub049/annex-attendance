@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "BUBT Annex Attendance Assistant",
-  "version": "1.3.0",
-  "description": "Premium BUBT Annex attendance assistant. Remembers selections across Annex refresh and refreshes after confirmed manual submissions.",
+  "version": "1.4.0",
+  "description": "Premium BUBT Annex attendance assistant. Scrolls to Annex Submit, corrects individual period class count, and remembers filled/submitted progress across refresh.",
   "action": {
     "default_title": "BUBT Annex Attendance Assistant"
   },

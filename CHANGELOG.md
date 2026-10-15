@@ -1,3 +1,11 @@
+# v1.4.0 — Faster attendance workflow
+
+- Automatically scroll the Annex webpage to its manual Submit control after a successful fill (fallback to table bottom).
+- Correct individual period filling to always use No. of Class = 1; identical combined periods use the group count.
+- Green circled date and period ticks with partial completion, per-course session progress, persisted across manual/automatic Annex refresh.
+- Distinguish on-screen filled progress from confirmed successful submissions; only a fresh Annex confirmation promotes to Submitted.
+- Fill Next skips locally marked sessions after refresh.
+
 # Changelog
 
 ## 1.3.0 — Seamless next-date attendance

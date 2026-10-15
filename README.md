@@ -1,4 +1,4 @@
-# BUBT Annex Attendance Assistant — v1.3.0
+# BUBT Annex Attendance Assistant — v1.4.0
 
 This build replaces the old Excel-upload demo with a server-connected workflow.
 
@@ -50,7 +50,7 @@ The extension is configured to use the same production API found in the supplied
 
 ## Safety rule
 
-There is no code that clicks, invokes, or searches for an Annex Submit/Save button. Login form submission is internal to the extension only.
+There is no code that clicks or invokes an Annex Submit/Save button. The extension may locate the button solely to scroll to it. Annex submission always remains manual.
 
 
 ## UI refresh (v1.1.0)
@@ -61,7 +61,7 @@ This version updates the extension interface with a more premium teacher-friendl
 This release completely redesigns the extension drawer and attendance session controls while preserving the same secure Marks Portal server workflow and manual Annex submit behavior.
 
 
-## Seamless attendance workflow (v1.3.0)
+## Seamless attendance workflow (v1.4.0)
 
 1. Install or **Reload** the extension in `chrome://extensions/` after replacing the extracted folder. Refresh the Annex tab once after updating the extension.
 2. On Annex **New Attendance**, open the Attendance Assistant and choose Intake, Section, and Course as usual.
@@ -82,3 +82,13 @@ Clicking the extension **×** or elsewhere on Annex (other than its Submit butto
 
 ### Testing note
 The fill/restore/next-date workflow and fresh-success-triggered page reload were checked using a local browser mock of the Annex form. Actual Annex production DOM and submission behavior need a live signed-in acceptance check because Annex is a third-party site.
+
+## v1.4.0: Faster, safer progress workflow
+
+- Filling **any individual period** sets Annex **No. of Class = 1**, including period 2 or later. The period number identifies the source attendance; it is not the number of classes being submitted.
+- Filling an identical-attendance group together still sets **No. of Class = N** (e.g. 2 for two periods).
+- After filling the Annex checkboxes, the assistant scrolls the **Annex webpage** to its visible Submit control, without clicking it. If a Submit control cannot be found, it scrolls toward the bottom of the attendance table.
+- A small **green circled check** marks each filled period and its date (e.g. **1/2 filled**, **2/2 filled**). The assistant also remembers its progress in Chrome's tab-scoped extension session storage across manual and automatic Annex refresh.
+- **Filled** means the extension populated the form; **Submitted** appears only if a fresh success confirmation is detected after the teacher manually clicks Annex Submit. Progress markers are not Annex's official submission history.
+- Fill Next skips locally marked periods, including after a reload. An unsubmitted fill may still appear marked after a manual refresh; teachers should verify submission in Annex. Refill a row to try again.
+- Progress is stored separately per course and cleared on extension logout/account change. Closing the Annex tab clears the tab-scoped progress. No attendance values or student lists are persisted by this feature.
